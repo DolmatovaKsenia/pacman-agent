@@ -1,19 +1,15 @@
 # Team Information
 
-**Course:** _[fill your course code and name]_
+**Course:** _Autonomous Systems (Universitat Pompeu Fabra) 2026-32806-T1_
 
-**Semester:** Semester 2, 2020
+**Semester:** Semester 1, 2026
 
-**Instructor:** _[name of your instructor]_
+**Instructor:** _Javier Segovia Aguas_
 
-**Team name:** _[replace this with team name in plan text]_
+**Team name:** _Yamo_
 
 **Team members:**
 
-* Student 1's Student number - Full Name - Student email - Student Github id
-* Student 2's Student number - Full Name - Student email - Student Github id
-* Student 3's Student number - Full Name - Student email - Student Github id
-
-Replace the lines above with the correct details of members. Delete or add lines as needed.
-
-Student numbers should just be the **numbers**.
+* Student 1's 283420 - Kseniia Dolmatova - kseniia.dolmatova01@estudiant.upf.edu - DolmatovaKsenia
+* Student 2's 283355 - Marcos Barbosa - marcos.barbosa01@estudiant.upf.edu - MarcosBarbosaR
+* Student 3's 283343 - Fernanda Martínez - fernanda.martinez01@estudiant.upf.edu - fermartinezm
