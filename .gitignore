@@ -1,2 +1,23 @@
-*\__pycache__
-*\contest.egg-info
+# Python virtual environments
+venv/
+.venv/
+env/
+
+# Python caches and build files
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Game outputs (replays, scores, logs)
+*.replay
+*.log
+replays/
+scores/
+logs/
+www/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
