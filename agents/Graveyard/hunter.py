@@ -6,36 +6,30 @@
 # John DeNero (denero@cs.berkeley.edu) and Dan Klein (klein@cs.berkeley.edu).
 # For more info, see http://inst.eecs.berkeley.edu/~cs188/sp09/pacman.html
 
-# =============================================================================
-# HUNTER  -  path planning + full world view  (best agent so far)
-# =============================================================================
-# Sees every opponent (observation_function returns the full state) and,
-# instead of looking one move ahead, plans whole paths with BFS that avoid
-# the cells next to active ghosts.
-#
-# Attacker (HunterAttacker) - each turn, the first rule that applies wins:
-#   1. Scared ghost reachable before its timer ends (<= 10 steps): hunt it.
-#   2. Still a ghost on our side and an invader within 2 cells: eat it.
-#   3. Go home to score when carrying 6 food, when time is running out,
-#      or when a ghost is within 5 cells (a closer capsule is preferred
-#      as an escape).
-#   4. A ghost guards the way (<= 7 cells): go for a power capsule.
-#   5. Otherwise: nearest food reachable without passing next to a ghost.
-#   If nothing is safe: go home if carrying food, else run away from ghosts.
-#   Tunables: CARRY_LIMIT, GHOST_ALERT, HUNT_RANGE.
-#
-# Defender (HunterDefender)
-#   - Invader on our side: chase it along the shortest path
-#     (scared: shadow it at distance 2 so it cannot eat us).
-#   - No invader: wait ONE step behind the border (GUARD_DEPTH = 1), in front
-#     of where the closest enemy would cross. Never stands right next to an
-#     enemy ghost (no mirror / face-off): it steps back, lets it cross, and
-#     eats it as soon as it becomes a Pacman.
-#
-# Safety: if choosing a move raises an error it plays a random legal move.
-# Typical result: wins every game against baseline_team (avg about +16).
-# =============================================================================
+"""
+Hunter team: path-planning agents with full world view.
 
+- HunterAttacker: plans paths with BFS that avoid the cells around active
+  ghosts. Priorities each turn:
+    1. eat scared ghosts it can reach before they recover,
+    2. eat an invader next to it while it is still a ghost on our side,
+    3. go home to score when carrying enough, when time runs out, or when a
+       ghost is close and no capsule is safer,
+    4. go for a power capsule when a ghost guards the way,
+    5. eat the nearest safely reachable food.
+- HunterDefender: chases every invader along the shortest path (keeping a
+  2-cell margin while scared); with no invaders it waits at the border cell
+  closest to the enemy that is nearest to crossing.
+
+Both see every opponent's exact position by overriding observation_function.
+"""
+
+# INTERCEPT (full view): see intercept_filter. Our ghosts predict the
+# invader's route (to our nearest food and back, or straight home when it
+# carries 3+ food) and wait on it instead of chasing it from behind.
+# Measured in a 792-game league: a small gain here; it made pddl_astar,
+# decoy and planner_pro worse, so only hunter and fortress use it.
+#
 import random
 import traceback
 from collections import deque
@@ -82,13 +76,92 @@ class HunterAgent(CaptureAgent):
     def get_action(self, game_state):
         # An exception would forfeit the game: log it and play a legal move instead.
         try:
-            return super().get_action(game_state)
+            return self.intercept_filter(game_state, super().get_action(game_state))
         except Exception:
             traceback.print_exc()
             actions = game_state.get_legal_actions(self.index)
             return random.choice([a for a in actions if a != Directions.STOP] or actions)
 
     # --- geometry -------------------------------------------------------
+
+    # --- INTERCEPT (full view: predict where the invader goes) -------------------
+    def intercept_filter(self, game_state, action):
+        """
+        INTERCEPT. Full view gives the exact position of every invader and how
+        much food it carries, so instead of chasing it from behind (same speed:
+        never caught) we predict its route and cut it:
+          - an invader carrying 3+ food (or with little food left to eat) is
+            going home: its route is the shortest path to its own side;
+          - otherwise it is going to eat: shortest path to our nearest food,
+            and from there home.
+        We go to the first cell of that route that we reach no later than the
+        invader. Only for a ghost on our side that is not scared; within 2 cells
+        of the invader we simply go for it.
+        """
+        me = game_state.get_agent_state(self.index)
+        if me.is_pacman or me.scared_timer > 0:
+            return action
+        my_pos = self.cell(me.get_position())
+        invaders = [(p, e) for p, e in self.enemy_states(game_state) if e.is_pacman]
+        if not invaders:
+            return action
+        inv_pos, inv = min(invaders, key=lambda pe: self.dist(my_pos, pe[0]))
+        if self.dist(my_pos, inv_pos) <= 2 or self.dist(my_pos, inv_pos) > 12:
+            return action
+        their_border_x = self.mid if self.red else self.mid - 1
+        their_home = [(their_border_x, y) for y in range(self.walls.height) if not self.walls[their_border_x][y]]
+        our_food = self.get_food_you_are_defending(game_state).as_list()
+        if inv.num_carrying >= 3 or not our_food:
+            goal = min(their_home, key=lambda b: self.dist(inv_pos, b))
+            route = self.path_cells(inv_pos, goal)
+        else:
+            food = min(our_food, key=lambda f: self.dist(inv_pos, f))
+            exit_cell = min(their_home, key=lambda b: self.dist(food, b))
+            route = self.path_cells(inv_pos, food) + self.path_cells(food, exit_cell)[1:]
+        for k, c in enumerate(route):
+            if k == 0 or not self.on_my_side(c):
+                continue
+            if self.dist(my_pos, c) <= k:
+                if c == my_pos:
+                    return Directions.STOP
+                step = self.first_step(game_state, my_pos, c)
+                return step or action
+        return action
+
+    def path_cells(self, start, goal):
+        """Cells of a shortest path from start to goal (BFS over the maze), start included."""
+        if start == goal:
+            return [start]
+        parent = {start: None}
+        frontier = deque([start])
+        while frontier:
+            c = frontier.popleft()
+            if c == goal:
+                break
+            for n in self.neighbours(c):
+                if n not in parent:
+                    parent[n] = c
+                    frontier.append(n)
+        if goal not in parent:
+            return [start]
+        path = [goal]
+        while parent[path[-1]] is not None:
+            path.append(parent[path[-1]])
+        return path[::-1]
+
+    def first_step(self, game_state, start, goal):
+        """Legal first move of a shortest path on our side towards goal, or None."""
+        best, best_d = None, INF if 'INF' in globals() else float('inf')
+        for a in game_state.get_legal_actions(self.index):
+            if a == Directions.STOP:
+                continue
+            nxt = self.cell(game_state.generate_successor(self.index, a).get_agent_position(self.index))
+            if not self.on_my_side(nxt):
+                continue
+            d = self.dist(nxt, goal)
+            if d < best_d:
+                best, best_d = a, d
+        return best
 
     def on_my_side(self, cell):
         return cell[0] < self.mid if self.red else cell[0] >= self.mid
