@@ -65,7 +65,7 @@ from contest.util import nearest_point, manhattan_distance
 # DIR_SCRIPT = sys.path[0] + "/src/contest/"
 import contest
 
-DIR_SCRIPT = '/'.join(contest.__file__.split('/')[:-1])
+DIR_SCRIPT = os.path.dirname(os.path.abspath(contest.__file__))
 
 # If you change these, you won't affect the server, so you can't cheat
 KILL_POINTS = 0
