@@ -7,7 +7,6 @@ env/
 __pycache__/
 *.py[cod]
 *.egg-info/
-
 # Game outputs (replays, scores, logs)
 *.replay
 *.log
@@ -21,3 +20,5 @@ www/
 .idea/
 .DS_Store
 Thumbs.db
+
+*/__pycache__
