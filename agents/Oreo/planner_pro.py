@@ -231,7 +231,7 @@ def plan_astar(init, goal, actions, heuristic=lambda s: 0, max_expansions=20000,
 
 class PlannerAgentBase(CaptureAgent):
     DEAD_END_SAFETY = False
-    LOCK_LEAD = 6      # winning by this much: both agents defend
+    LOCK_LEAD = 4      # tuned (was 6): winning by this much, both agents defend
     LOCK_MOVES = 60    # winning with this few moves left (per agent): both defend
     GUARD_DEPTH = 1    # defenders wait one step behind the border (no face-off)
     # Anti-loop: stuck = last LOOP_WINDOW attacking turns on <= LOOP_CELLS cells without eating.
@@ -599,7 +599,7 @@ class AttackPlanner:
     MAX_FOOD_TARGETS = 6     # nearest food considered as objects of the problem
     HUNT_RANGE = 10          # a scared ghost this close (and in time) becomes the goal
     COMMITMENT = 3           # the current target looks this many steps cheaper (avoids dithering)
-    HORIZON = 3              # plan at most this many more food before going home
+    HORIZON = 4              # tuned (was 3): plan up to 4 more food before going home
 
     def __init__(self, agent):
         self.agent = agent

@@ -166,10 +166,6 @@
 # or to solve it with an external planner (e.g. Fast Downward).
 # =============================================================================
 
-# POWER PLAY: see power_filter. After a capsule, gather the most remote food
-# that can be banked in time instead of hunting scared ghosts; eat a ghost
-# only near the end of the scare, and go home before it ends.
-#
 import heapq
 import math
 import itertools
@@ -298,7 +294,7 @@ def plan_astar(init, goal, actions, heuristic=lambda s: 0, max_expansions=20000,
 
 class PlannerAgentBase(CaptureAgent):
     DEAD_END_SAFETY = False
-    LOCK_LEAD = 6      # winning by this much: both agents defend
+    LOCK_LEAD = 4      # tuned (was 6): winning by this much, both agents defend
     LOCK_MOVES = 60    # winning with this few moves left (per agent): both defend
     GUARD_DEPTH = 1    # defenders wait one step behind the border (no face-off)
     BREAK_TURNS = 4    # loop brain: turns spent avoiding the cells of a detected loop
@@ -558,7 +554,7 @@ class PlannerAgentBase(CaptureAgent):
         pairing = min([enemies, enemies[::-1]], key=cost)
         return pairing[self.team.index(self.index)]
 
-    def _base_get_action(self, game_state):
+    def get_action(self, game_state):
         # An exception would forfeit the game: log it and play a legal move instead.
         self.turn_start = time.perf_counter()
         self.guarding = False
@@ -625,94 +621,6 @@ class PlannerAgentBase(CaptureAgent):
         return self.turn_start + MOVE_TIME_BUDGET * 0.6
 
     # --- geometry -------------------------------------------------------
-
-    # --- POWER PLAY (after eating a capsule) -----------------------------------------
-    EAT_LATE = 5        # eat a scared ghost only when its scare has this many moves left (or fewer)
-    POWER_MARGIN = 2    # moves of margin to be home before the scare ends
-
-    def get_action(self, game_state):
-        action = self._base_get_action(game_state)
-        try:
-            return self.power_filter(game_state, action)
-        except Exception:
-            traceback.print_exc()
-            return action
-
-    def power_filter(self, game_state, action):
-        """
-        POWER PLAY. While every enemy ghost is scared (we ate a capsule), eating
-        ghosts gives no points, so our Pacman does not hunt them:
-          - it gathers as much food as possible, preferring the most remote food
-            (deep in their side, normally guarded), but only food it can reach
-            AND bring home before the scare ends;
-          - it eats a scared ghost only near the end of the scare (EAT_LATE moves
-            left, within 2 cells): the ghost then respawns far away just when it
-            would have become dangerous again. Before that it avoids stepping
-            on scared ghosts;
-          - when the scare left only covers the way home, it goes home to bank.
-        """
-        me = game_state.get_agent_state(self.index)
-        if not me.is_pacman:
-            return action
-        ghosts = [(p, e) for p, e in self.enemy_states(game_state) if not e.is_pacman]
-        if not ghosts or any(e.scared_timer <= 0 for _, e in ghosts):
-            return action                                   # not every ghost is scared
-        scare = min(e.scared_timer for _, e in ghosts)
-        my_pos = self.cell(me.get_position())
-        home = self.distance_home(my_pos)
-
-        # Late in the scare: eat a scared ghost that is right there.
-        if scare <= self.EAT_LATE:
-            close = [p for p, _ in ghosts if self.dist(my_pos, p) <= 2]
-            if close:
-                step = self.power_step(game_state, my_pos, set(close), set())
-                if step:
-                    return step
-        avoid = set() if scare <= self.EAT_LATE else {p for p, _ in ghosts}
-
-        # Time is up: bank what we carry.
-        if scare <= home + self.POWER_MARGIN:
-            if me.num_carrying > 0:
-                return self.power_step(game_state, my_pos, set(self.home_border), avoid) or action
-            return action
-
-        # Gather: food we can reach and bring home in time, preferring remote food.
-        food = self.get_food(game_state).as_list()
-        feasible = [f for f in food
-                    if self.dist(my_pos, f) + self.distance_home(f) + self.POWER_MARGIN <= scare]
-        if not feasible:
-            if me.num_carrying > 0:
-                return self.power_step(game_state, my_pos, set(self.home_border), avoid) or action
-            return action
-        target = min(feasible, key=lambda f: self.dist(my_pos, f) - 0.5 * self.distance_home(f))
-        return self.power_step(game_state, my_pos, {target}, avoid) or action
-
-    def power_step(self, game_state, start, targets, blocked):
-        """Legal first move of a shortest path from start to any target avoiding `blocked`, or None."""
-        if not targets:
-            return None
-        first = {}
-        frontier = deque()
-        for a in game_state.get_legal_actions(self.index):
-            if a == Directions.STOP:
-                continue
-            n = self.cell(game_state.generate_successor(self.index, a).get_agent_position(self.index))
-            if n in first or (n in blocked and n not in targets):
-                continue
-            if n in targets:
-                return a
-            first[n] = a
-            frontier.append(n)
-        while frontier:
-            c = frontier.popleft()
-            for n in self.neighbours(c):
-                if n in first or n in blocked:
-                    continue
-                first[n] = first[c]
-                if n in targets:
-                    return first[n]
-                frontier.append(n)
-        return None
 
     def on_my_side(self, cell):
         return cell[0] < self.mid if self.red else cell[0] >= self.mid
@@ -1180,7 +1088,7 @@ class AttackPlanner:
     MAX_FOOD_TARGETS = 6     # nearest food considered as objects of the problem
     HUNT_RANGE = 10          # a scared ghost this close (and in time) becomes the goal
     COMMITMENT = 3           # the current target looks this many steps cheaper (avoids dithering)
-    HORIZON = 3              # plan at most this many more food before going home
+    HORIZON = 4              # tuned (was 3): plan up to 4 more food before going home
 
     def __init__(self, agent):
         self.agent = agent

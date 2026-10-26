@@ -72,10 +72,10 @@ INF = float('inf')
 
 
 class StrategistAgent(CaptureAgent):
-    TRIP_SIZE = 5          # food per trip while a defender is around
+    TRIP_SIZE = 6          # tuned (was 5): food per trip while a defender is around
     TRIP_SIZE_FREE = 10    # food per trip when no active defender is near
     GHOST_ALERT = 4        # an active ghost this close ends the trip
-    CAPSULE_ALERT = 6      # an active ghost this close makes us take a capsule
+    CAPSULE_ALERT = 4      # tuned (was 6): an active ghost this close makes us take a capsule
     HUNT_RANGE = 8         # how far we go to eat a scared defender
     HOME_PULL = 0.3        # weight of "distance to home" when choosing the next food
 
