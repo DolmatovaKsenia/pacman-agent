@@ -203,6 +203,12 @@
 # or to solve it with an external planner (e.g. Fast Downward).
 # =============================================================================
 
+# STOP THE CARRIER (team rule): see stop_filter. An enemy Pacman carrying
+# STOP_CARRY+ food on our side is going to bank it: the closer agent chases
+# it and the other blocks the border cell it needs to cross home.
+# Measured (1080-game league, with vs without): lama 49.5 -> 61.5 points; it
+# made alphabeta, strategist, planner and pddl_astar worse, so only lama uses it.
+#
 import heapq
 import math
 import itertools
@@ -782,7 +788,7 @@ class PlannerAgentBase(CaptureAgent):
         pairing = min([enemies, enemies[::-1]], key=cost)
         return pairing[self.team.index(self.index)]
 
-    def get_action(self, game_state):
+    def _stop_base_get_action(self, game_state):
         # An exception would forfeit the game: log it and play a legal move instead.
         self.turn_start = time.perf_counter()
         self.guarding = False
@@ -849,6 +855,83 @@ class PlannerAgentBase(CaptureAgent):
         return self.turn_start + MOVE_TIME_BUDGET * 0.6
 
     # --- geometry -------------------------------------------------------
+
+    # --- STOP THE CARRIER (team rule) -------------------------------------------------
+    STOP_CARRY = 3      # an enemy Pacman carrying this much food is going to bank it: stop it
+
+    def get_action(self, game_state):
+        action = self._stop_base_get_action(game_state)
+        try:
+            return self.stop_filter(game_state, action)
+        except Exception:
+            traceback.print_exc()
+            return action
+
+    def stop_filter(self, game_state, action):
+        """
+        STOP THE CARRIER. An enemy Pacman on our side carrying STOP_CARRY food or
+        more is about to bank it. Both our agents go for it (full view tells us
+        exactly where it is and how much it carries):
+          - the closer one chases it;
+          - the other runs to the border cell it must cross to get home and
+            blocks it (if it can get there in time; otherwise it chases too);
+          - an agent on the enemy side first comes back (banking what it has);
+          - a scared agent keeps its normal move (the carrier would eat it).
+        """
+        carriers = [(p, e) for p, e in self.enemy_states(game_state)
+                    if e.is_pacman and e.num_carrying >= self.STOP_CARRY]
+        if not carriers:
+            return action
+        me = game_state.get_agent_state(self.index)
+        if me.scared_timer > 0:
+            return action
+        my_pos = self.cell(me.get_position())
+        team = sorted(self.get_team(game_state))
+        pos = {i: self.cell(game_state.get_agent_state(i).get_position()) for i in team}
+        target, carrier = max(carriers, key=lambda pe: (pe[1].num_carrying, -self.dist(my_pos, pe[0])))
+
+        if me.is_pacman:
+            active = [p for p, e in self.enemy_states(game_state) if not e.is_pacman and e.scared_timer <= 2]
+            danger = {c for g in active for c in [g] + self.neighbours(g) if not self.on_my_side(c)}
+            return self.stop_step(game_state, my_pos, set(self.home_border), danger, own_side=False) or action
+
+        able = [i for i in team if game_state.get_agent_state(i).scared_timer == 0]
+        chaser = min(able, key=lambda i: (self.dist(pos[i], target), i))
+        if self.index == chaser:
+            goal = target
+        else:
+            exit_cell = min(self.home_border, key=lambda b: self.dist(target, b))
+            in_time = self.dist(my_pos, exit_cell) <= self.dist(target, exit_cell) + 1
+            goal = exit_cell if in_time and self.dist(my_pos, target) > 2 else target
+        if my_pos == goal:
+            return Directions.STOP
+        self.stops = getattr(self, 'stops', 0) + 1
+        return self.stop_step(game_state, my_pos, {goal}, set(), own_side=True) or action
+
+    def stop_step(self, game_state, start, targets, blocked, own_side):
+        """Legal first move of a shortest path to any target avoiding `blocked` (optionally only our side)."""
+        first = {}
+        frontier = deque()
+        for a in game_state.get_legal_actions(self.index):
+            if a == Directions.STOP:
+                continue
+            n = self.cell(game_state.generate_successor(self.index, a).get_agent_position(self.index))
+            if n in first or n in blocked or (own_side and not self.on_my_side(n)):
+                continue
+            if n in targets:
+                return a
+            first[n] = a
+            frontier.append(n)
+        while frontier:
+            c = frontier.popleft()
+            for n in self.neighbours(c):
+                if n in first or n in blocked or (own_side and not self.on_my_side(n)):
+                    continue
+                first[n] = first[c]
+                if n in targets:
+                    return first[n]
+                frontier.append(n)
+        return None
 
     def on_my_side(self, cell):
         return cell[0] < self.mid if self.red else cell[0] >= self.mid
