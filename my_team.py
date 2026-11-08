@@ -1,5 +1,4 @@
 # my_team.py — IW(1) Offensive Agent + Reflex Defensive Agent
-# Skeleton: fill in the 4 gaps marked with FILL_IN
 
 import random
 import time
@@ -38,11 +37,6 @@ def get_atoms(game_state, agent_index):
     atoms.add(('at', my_pos))
 
     # Atom 2: for each food position, is food still there?
-    # FILL_IN_1: get the food grid for the agent's team, convert to list,
-    #            and add an atom ('food', (x,y)) for each food position that exists
-    #            Hint: you need to know if the agent is red or blue to get the right food
-    #            Use game_state.get_blue_food() or game_state.get_red_food()
-    #            depending on which team the agent is on (red eats blue food, blue eats red food)
     food = game_state.get_blue_food() if game_state.is_on_red_team(agent_index) else game_state.get_red_food()
     for pos in food.as_list():
         atoms.add(('food', pos))
@@ -88,8 +82,6 @@ def iw1_search(game_state, agent_index, goal_test, max_depth=20, time_limit=0.8)
                 continue
 
             # Generate successor state
-            # FILL_IN_2: use current_state.generate_successor to get the next state
-            #            Hint: generate_successor takes (agent_index, action)
             successor = current_state.generate_successor(agent_index, action)
 
             new_actions = actions + [action]
@@ -106,8 +98,7 @@ def iw1_search(game_state, agent_index, goal_test, max_depth=20, time_limit=0.8)
                     novel = True
                     seen_atoms.add(atom)
 
-            # FILL_IN_3: only add to queue if the state is novel
-            #            (this is the key pruning step of IW(1))
+            # only add to queue if the state is novel
             if novel:
                 queue.append((successor, new_actions))
 
@@ -214,8 +205,7 @@ class OffensiveIWAgent(CaptureAgent):
             target_pos = subgoal[1]
             def goal_test(state):
                 pos = nearest_point(state.get_agent_state(agent_index).get_position())
-                # FILL_IN_4: return True if the agent's position equals the target food position
-                #            Hint: just compare pos to target_pos
+                # return True if the agent's position equals the target food position
                 return pos == target_pos
             return goal_test
 
@@ -313,6 +303,13 @@ class DefensiveReflexAgent(CaptureAgent):
     def register_initial_state(self, game_state):
         self.start = game_state.get_agent_position(self.index)
         CaptureAgent.register_initial_state(self, game_state)
+        self.boundary = self._get_boundary_positions(game_state)
+
+    def _get_boundary_positions(self, game_state):
+            walls = game_state.get_walls()
+            mid_x = walls.width // 2
+            x = mid_x - 1 if self.red else mid_x
+            return [(x, y) for y in range(walls.height) if not walls[x][y]]
 
     def choose_action(self, game_state):
         actions = game_state.get_legal_actions(self.index)
@@ -331,7 +328,7 @@ class DefensiveReflexAgent(CaptureAgent):
     def _evaluate(self, game_state, action):
         features = self._get_features(game_state, action)
         weights = {'num_invaders': -1000, 'on_defense': 100,
-                   'invader_distance': -10, 'stop': -100, 'reverse': -2}
+                   'invader_distance': -10, 'stop': -100, 'reverse': -2, 'border_patrol':-10}
         return sum(features.get(k, 0) * v for k, v in weights.items())
 
     def _get_features(self, game_state, action):
@@ -339,6 +336,7 @@ class DefensiveReflexAgent(CaptureAgent):
         successor = self._get_successor(game_state, action)
         my_state = successor.get_agent_state(self.index)
         my_pos = my_state.get_position()
+        
 
         features['on_defense'] = 1
         if my_state.is_pacman:
@@ -357,4 +355,24 @@ class DefensiveReflexAgent(CaptureAgent):
         if action == rev:
             features['reverse'] = 1
 
+        if len(invaders) == 0:
+            target = self._get_patrol_target(game_state)
+            features['border_patrol'] = self.get_maze_distance(my_pos, target)
+
         return features
+
+    def _get_patrol_target(self, game_state):
+        """Boundary cell whose maze distance from us best matches the noisy
+        distance to the nearest opponent. Uses the *current* state, so every
+        candidate action is scored against the same target."""
+        my_pos = game_state.get_agent_position(self.index)
+        noisy = game_state.get_agent_distances()
+        opp_dists = [noisy[i] for i in self.get_opponents(game_state) if noisy[i] is not None]
+        if not opp_dists:
+            return min(self.boundary, key=lambda b: self.get_maze_distance(my_pos, b))
+
+        nearest = min(opp_dists)
+        # Primary: closest match to the noisy reading. Tie-break: nearer to us.
+        return min(self.boundary,
+                   key=lambda b: (abs(self.get_maze_distance(my_pos, b) - nearest),
+                                  self.get_maze_distance(my_pos, b)))
