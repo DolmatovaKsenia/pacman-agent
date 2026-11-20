@@ -570,6 +570,42 @@ def get_tracker(agent, game_state):
 #                            FIRST= 70: friend default 45-19, league 62%
 #                            FIRST= 80: friend default 39-24, league 65%
 #                            (apex:       friend default 36-27, league 69%)
+# FAILURE FIXES (each one an "if" for a situation where we lost, found by
+# replaying the games frankenstein lost and apex did not):
+#   FIX 1  a lone invader already carrying >= KEEP_CHASE_CARRY (2) food is not a
+#          capsule runner: the keeper leaves its ring and defends normally.
+#   FIX 2  attacker with no safe plan for NOPLAN_RISK (12) turns in a row (stuck
+#          circling at their border): take the risk mode and go in.
+#   FIX 3  guard/keeper, behind and no invader for QUIET_JOIN (20) turns: join
+#          the attack.
+#   FIX 4  siege decoy that the defenders ignore (no food eaten for DECOY_STALL
+#          (25) turns): the decoy attacks too for DECOY_PUSH (40) turns.
+#   FIX 5  our capsule eaten and both enemies looting our side: the scared guard
+#          loots their empty side instead of watching.
+#   Measured (league = 108 games per map vs a_star_pro, pddl_astar, alphabeta;
+#   friend = 64 games per map):
+#                 league default  league RANDOM  friend default  friend RANDOM
+#     before          45%             -              51-10          25-38
+#     FIX 1-2         54%             -              46-15          25-38
+#     FIX 1-4         57%            69%             46-17          25-38
+#     FIX 1-5         56%            71%             48-14          25-38
+#   Tried and dropped: keeper on maps with two capsules per side (friend RANDOM
+#   21-41, league RANDOM 52%).
+#   PLAN = 'profiler'      enemy model with one plan per profile (see
+#                          _ProfileMixin): raider -> capsule lock, looter -> two
+#                          roles, camper -> double attack, balanced -> apex.
+#                          Measured (friend default / RANDOM, league default / RANDOM):
+#                            adaptive (default):   48-14 / 25-38,  56% / 71%
+#                            profiler every 150:   48-14 / 24-40,  53% / 73%
+#                            profiler every 50:    34-27 / 23-41,  47% / 70%
+#                            without looter plan:  33-28 / 24-40,  50% / 72%
+#                            without camper plan:  34-27 / 24-40,  50% / 67%
+#                            + sticky raider:      49-13 / 24-40,  53% / 74%
+#                            sticky, every 50:     49-13 / 23-41,  50% / 69%
+#                            camper -> apex, no looter: 48-14 / 24-39, 56% / 69%
+#                          (now default for this plan: sticky raider, every 150)
+#                          Not better than 'adaptive' yet: apex's own role logic
+#                          already answers looters and campers.
 # The plan can also be picked without editing the file with the environment
 # variable OREO_PLAN, or with create_team(..., plan='capsule_race').
 # Built from: alphabeta.py (tactical alpha-beta), pddl_astar.py (A* PDDL
@@ -582,6 +618,7 @@ PLANS = {
     'two_roles':    ('RoleAttacker', 'RoleGuard', {'ROLES_AFTER': 0}),
     'flex':         ('FlexAgent', 'FlexAgent', {}),
     'adaptive':     ('AdaptiveRusher', 'AdaptiveKeeper', {}),
+    'profiler':     ('ProfileRusher', 'ProfileKeeper', {}),
 }
 PLAN_DEFAULTS = {'ROLES_AFTER': 15}
 
@@ -595,7 +632,8 @@ def create_team(first_index, second_index, is_red,
     for k, v in PLAN_DEFAULTS.items():
         setattr(PlannerAgentBase, k, overrides.get(k, v))
     agents = {cls.__name__: cls for cls in (PlannerAttacker, PlannerDefender, FlexAgent, RoleAttacker, RoleGuard,
-                                            CapsuleRusher, CapsuleKeeper, AdaptiveRusher, AdaptiveKeeper)}
+                                            CapsuleRusher, CapsuleKeeper, AdaptiveRusher, AdaptiveKeeper,
+                                            ProfileRusher, ProfileKeeper)}
     team = [agents[first or p_first](first_index), agents[second or p_second](second_index)]
     key = object()   # one shared tracker for this team in this game
     for a in team:
@@ -720,13 +758,17 @@ class PlannerAgentBase(CaptureAgent):
     DECOY_MOVES = 30   # decoy plan in the last moves of the game (per agent) when not winning
     DECOY_DISTANCE = 3 # the decoy hovers this far from the defender it distracts
     DECOY_GUARD = 8    # the decoy goes after invaders this close to it
+    DECOY_STALL = 25   # FIX 4: decoy turns without progress before it attacks too
+    DECOY_PUSH = 40    # ... for this many turns, then decoy again
     decoy_roles = {}   # shared by the two agents of the team: team -> (timeleft, decoy index)
     # Anti-loop: stuck = last LOOP_WINDOW attacking turns on <= LOOP_CELLS cells without eating.
     LOOP_WINDOW = 10
     LOOP_CELLS = 4
     RISK_TURNS = 6      # turns of risk mode (may pass next to a ghost)
     DETOUR_TURNS = 10   # turns of detour (retreat and enter somewhere else)
-    RISK_MAX_CARRY = 2  # take risks only while carrying at most this much food
+    RISK_MAX_CARRY = 2
+    NOPLAN_RISK = 12    # FIX 2: turns without a safe plan before taking the risk mode
+    # take risks only while carrying at most this much food
 
     team_key = None
 
@@ -943,6 +985,18 @@ class PlannerAgentBase(CaptureAgent):
         my_pos = self.cell(me.get_position())
         enemies = self.enemy_states(game_state)
         active = [p for p, e in enemies if not e.is_pacman and e.scared_timer <= 2]
+        # FIX 4: the defenders do not take the bait (siege stalemate: no food
+        # eaten by our team for DECOY_STALL turns): the decoy attacks too, so
+        # the two marked defenders face two attackers at once.
+        progress = (self.get_score(game_state),
+                    sum(game_state.get_agent_state(i).num_carrying for i in self.team))
+        if progress != getattr(self, 'decoy_progress', None):
+            self.decoy_progress, self.decoy_stall = progress, 0
+        self.decoy_stall = getattr(self, 'decoy_stall', 0) + 1
+        if self.decoy_stall % (self.DECOY_STALL + self.DECOY_PUSH) > self.DECOY_STALL:
+            self.decoy_now = False
+            self.decoy_pushes = getattr(self, 'decoy_pushes', 0) + 1
+            return self.attack(game_state, max(1, 1 - self.get_score(game_state)))
         if not active:  # nothing to distract: just score
             return self.attack(game_state, max(1, 1 - self.get_score(game_state)))
         target = min(active, key=lambda g: self.dist(my_pos, g))
@@ -2406,7 +2460,21 @@ class PlannerAttacker(PlannerAgentBase):
         else:
             action = None
         if self.legal(game_state, action) and action != Directions.STOP:
+            self.no_plan = 0
             return action
+
+        # FIX 2: no safe plan for NOPLAN_RISK turns in a row (a defender blocks every
+        # way in, outside the 4-cell loop detector): take the risk mode to get in.
+        self.no_plan = getattr(self, 'no_plan', 0) + 1
+        if self.no_plan >= self.NOPLAN_RISK and me.num_carrying == 0 and self.risk_turns == 0:
+            self.no_plan = 0
+            self.risk_turns = self.RISK_TURNS
+            self.noplan_risks = getattr(self, 'noplan_risks', 0) + 1
+            target, powered = self.planner.solve(game_state, quota)
+            if target is not None and target != 'home':
+                action, _ = self.bfs(my_pos, [target], self.danger_zone(active, my_pos))
+                if self.legal(game_state, action) and action != Directions.STOP:
+                    return action
 
         # No plan. Carrying food: bring it home. Empty: move along our border to the
         # crossing point farthest from the enemy ghosts and try again from there.
@@ -2588,9 +2656,28 @@ class RoleGuard(FlexAgent):
         cands = [c for c in cands if c[0] <= self.SNIPE_MAX]
         return min(cands)[1] if cands else None
 
+    # FIX 3: behind, and the enemy camps at home (no invader for QUIET_JOIN
+    # turns in a row): guarding an empty side is useless, join the attack.
+    QUIET_JOIN = 20
+
+    def join_attack(self, game_state):
+        enemies = self.enemy_states(game_state)
+        me = game_state.get_agent_state(self.index)
+        if any(e.is_pacman for _, e in enemies):
+            self.quiet = 0
+            return None
+        self.quiet = getattr(self, 'quiet', 0) + 1
+        if self.quiet >= self.QUIET_JOIN and self.get_score(game_state) < 0 and me.scared_timer == 0:
+            self.joins = getattr(self, 'joins', 0) + 1
+            return self.attack(game_state, self.QUOTA)
+        return None
+
     def choose_action(self, game_state):
         if not self.roles_on(game_state):
             return FlexAgent.choose_action(self, game_state)
+        action = self.join_attack(game_state)
+        if action is not None:
+            return action
         me = game_state.get_agent_state(self.index)
         my_pos = self.cell(me.get_position())
         enemies = self.enemy_states(game_state)
@@ -2613,6 +2700,12 @@ class RoleGuard(FlexAgent):
             return self.flee(game_state, active)
         if me.scared_timer > self.SCARED_ATTACK and not invaders:
             return self.attack(game_state, 1)
+        # FIX 5: our capsule is eaten (we are scared) and both enemies are on our
+        # side looting: a scared guard cannot stop them, and their side is empty.
+        # Loot it too instead of watching.
+        if me.scared_timer > self.SCARED_ATTACK and len(invaders) == len(enemies):
+            self.counter_loots = getattr(self, 'counter_loots', 0) + 1
+            return self.attack(game_state, self.QUOTA)
         if not invaders and self.get_score(game_state) <= self.SNIPE_LEAD:
             target = self.snipe_target(game_state, my_pos)
             if target is not None:
@@ -2700,6 +2793,7 @@ class CapsuleKeeper(RoleGuard):
         return None if self.race else RoleGuard.blitz(self, game_state)
 
     KEEP_RADIUS = 2
+    KEEP_CHASE_CARRY = 2
 
     def reach_cells(self, cap, r):
         return [c for c in self.home_dist if self.dist(c, cap) <= r]
@@ -2711,6 +2805,9 @@ class CapsuleKeeper(RoleGuard):
     def choose_action(self, game_state):
         if not self.race:
             return RoleGuard.choose_action(self, game_state)
+        action = self.join_attack(game_state)
+        if action is not None:
+            return action
         caps = self.get_capsules_you_are_defending(game_state)
         me = game_state.get_agent_state(self.index)
         if not caps or me.is_pacman or me.scared_timer > 0:
@@ -2725,6 +2822,12 @@ class CapsuleKeeper(RoleGuard):
             c = (int(my_pos[0] + dx), int(my_pos[1] + dy))
             if c in invaders and self.on_my_side(c):
                 return a
+        # FIX 1: a lone invader that is already eating (carrying food) while the
+        # other enemy stays home is not a capsule runner: defend normally.
+        loaded = [e for _, e in enemies if e.is_pacman and e.num_carrying >= self.KEEP_CHASE_CARRY]
+        if len(invaders) == 1 and loaded:
+            self.keep_fix1 = getattr(self, 'keep_fix1', 0) + 1
+            return self.defend(game_state)
         ring = [c for c in self.reach_cells(cap, self.KEEP_RADIUS) if c != cap and self.on_my_side(c)]
         if invaders and ring:
             inv = min(invaders, key=lambda p: self.dist(p, cap))
@@ -2755,6 +2858,9 @@ class _AdaptiveMixin:
     HOLD = 150
     AGGR_PACMEN = 1.2
     START_AGGR = True
+    SIGNAL = 'avg'     # 'avg' (mean enemy Pacmen) or 'both' (share of moves with both in)
+    BOTH_FRAC = 0.3
+    STICKY = False     # once classified attacking, never switch back
     adapt_state = {}   # shared by the team
 
     def _adapt(self, game_state):
@@ -2770,8 +2876,14 @@ class _AdaptiveMixin:
                                  if game_state.get_agent_state(o).is_pacman)
             if mv >= st['next']:
                 window = [n for t, n in st['seen'].items() if (1200 - t) // 4 > mv - self.OBS]
-                level = sum(window) / max(1, len(window))
-                st['aggr'] = level >= self.AGGR_PACMEN
+                if self.SIGNAL == 'both':     # share of moves with BOTH enemies on our side
+                    level = sum(1 for n in window if n >= 2) / max(1, len(window))
+                    aggr = level >= self.BOTH_FRAC
+                else:                         # average number of enemies on our side
+                    level = sum(window) / max(1, len(window))
+                    aggr = level >= self.AGGR_PACMEN
+                st['aggr'] = aggr or (self.STICKY and st.get('ever', False))
+                st['ever'] = st.get('ever', False) or aggr
                 st['log'].append((mv, round(level, 2), st['aggr']))
                 st['next'] = mv + self.HOLD + self.OBS if False else mv + self.HOLD
         return st['aggr']
@@ -2810,3 +2922,80 @@ class AdaptiveKeeper(_AdaptiveMixin, CapsuleKeeper):
     @SNIPE_LEAD.setter
     def SNIPE_LEAD(self, v):
         pass
+
+
+class _ProfileMixin:
+    """
+    OPPONENT MODEL. Every PROFILE_EVERY moves (first at FIRST) the team looks
+    at the last OBS moves of public information about the enemy and files it
+    under one profile; each profile has its own plan:
+      raider    on average >= AGGR_PACMEN enemies on our side (two-agent raids,
+                capsule runs: the friend)        -> CAPSULE LOCK (keeper + attacker)
+      looter    an enemy carried >= LOOT_CARRY food at once in the window
+                (one deep raider)                -> TWO ROLES (fixed guard + attacker)
+      camper    almost never on our side (<= CAMP_PACMEN) and we are not
+                ahead (it defends a lead)        -> DOUBLE ATTACK (both attack)
+      balanced  anything else                    -> APEX (flex roles)
+    Only public fields are used: is_pacman and num_carrying of each enemy.
+    """
+    PROFILE_EVERY = 150   # 50 re-files the friend too often and unlocks the capsule (34-27)
+    LOOT_CARRY = 6
+    RAIDER_STICKY = True    # once read as raider (by a decision), stay raider
+    CAMPER_PLAN = 'double'  # 'double' (both attack) or 'apex'
+    CAMP_PACMEN = 0.15
+    profile_state = {}
+
+    def _profile(self, game_state):
+        key, tl = tuple(self.team), game_state.data.timeleft
+        st = self.profile_state.get(key)
+        if st is None or st['tl'] < tl:
+            st = dict(tl=tl, seen={}, profile='raider' if self.START_AGGR else 'balanced',
+                      next=self.FIRST, log=[])
+            self.profile_state[key] = st
+        st['tl'] = tl
+        mv = (1200 - tl) // 4
+        if tl not in st['seen']:
+            opp = [game_state.get_agent_state(o) for o in self.get_opponents(game_state)]
+            st['seen'][tl] = (sum(1 for e in opp if e.is_pacman), max(e.num_carrying for e in opp))
+            if mv >= st['next']:
+                w = [v for t, v in st['seen'].items() if (1200 - t) // 4 > mv - self.OBS]
+                avg = sum(v[0] for v in w) / max(1, len(w))
+                carry = max((v[1] for v in w), default=0)
+                if avg >= self.AGGR_PACMEN or (self.RAIDER_STICKY and st['profile'] == 'raider'
+                                               and any(x[3] == 'raider' for x in st['log'])):
+                    p = 'raider'
+                elif carry >= self.LOOT_CARRY:
+                    p = 'looter'
+                elif avg <= self.CAMP_PACMEN and self.get_score(game_state) <= 0:
+                    p = 'camper'
+                else:
+                    p = 'balanced'
+                st['profile'] = p
+                st['log'].append((mv, round(avg, 2), carry, p))
+                st['next'] = mv + self.PROFILE_EVERY
+        return st['profile']
+
+    def _adapt(self, game_state):
+        return self._profile(game_state) == 'raider'
+
+    def profile_roles(self, game_state):
+        gs = getattr(self, '_gs', None) or game_state
+        roles = ('looter', 'camper') if self.CAMPER_PLAN == 'double' else ('looter',)
+        return not self.big_map and self._profile(gs) in roles
+
+
+class ProfileRusher(_ProfileMixin, AdaptiveRusher):
+    def roles_on(self, game_state):
+        return True if self.profile_roles(game_state) else AdaptiveRusher.roles_on(self, game_state)
+
+
+class ProfileKeeper(_ProfileMixin, AdaptiveKeeper):
+    def roles_on(self, game_state):
+        return True if self.profile_roles(game_state) else AdaptiveKeeper.roles_on(self, game_state)
+
+    def choose_action(self, game_state):
+        self._gs = game_state
+        if not self.big_map and self._profile(game_state) == 'camper' and self.CAMPER_PLAN == 'double':
+            self.camper_moves = getattr(self, 'camper_moves', 0) + 1
+            return RoleAttacker.choose_action(self, game_state)
+        return AdaptiveKeeper.choose_action(self, game_state)
